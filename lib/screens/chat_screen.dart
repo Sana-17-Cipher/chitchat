@@ -1,8 +1,10 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:intl/intl.dart';
 import 'package:image_picker/image_picker.dart';
+import 'contact_info_screen.dart';
 
 class ChatScreen extends StatefulWidget {
   final String receiverId;
@@ -21,6 +23,7 @@ class _ChatScreenState extends State<ChatScreen> {
   final ImagePicker _picker = ImagePicker();
   late final String _currentUserId;
   late final Stream<List<Map<String, dynamic>>> _messagesStream;
+  late final Stream<Map<String, dynamic>?> _receiverStatusStream;
   late final RealtimeChannel _typingChannel;
 
   bool _otherUserTyping = false;
@@ -49,6 +52,12 @@ class _ChatScreenState extends State<ChatScreen> {
       return filtered;
     });
 
+    _receiverStatusStream = supabase
+        .from('profiles')
+        .stream(primaryKey: ['id'])
+        .eq('id', widget.receiverId)
+        .map((rows) => rows.isNotEmpty ? rows.first : null);
+
     final ids = [_currentUserId, widget.receiverId]..sort();
     _typingChannel = supabase.channel('typing_${ids.join('_')}');
     _typingChannel.onBroadcast(
@@ -65,7 +74,12 @@ class _ChatScreenState extends State<ChatScreen> {
 
   Future<void> _checkBlockStatus() async {
     try {
-      final data = await supabase.from('blocked_users').select().eq('blocker_id', _currentUserId).eq('blocked_id', widget.receiverId).maybeSingle();
+      final data = await supabase
+          .from('blocked_users')
+          .select()
+          .eq('blocker_id', _currentUserId)
+          .eq('blocked_id', widget.receiverId)
+          .maybeSingle();
       if (mounted) setState(() => _isBlockedByMe = data != null);
     } catch (e) {
       debugPrint('Failed to check block status: $e');
@@ -134,27 +148,39 @@ class _ChatScreenState extends State<ChatScreen> {
       _messageController.clear();
       setState(() => _replyingTo = null);
     } catch (e) {
+      debugPrint('SEND MESSAGE ERROR: $e');
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Message failed to send. Check your connection and try again.')));
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Message failed to send. Check your connection and try again.')),
+        );
       }
     }
   }
 
-  Future<void> _pickAndSendImage() async {
-    final XFile? picked = await _picker.pickImage(source: ImageSource.gallery, maxWidth: 1600, imageQuality: 80);
-    if (picked == null) return;
+  Future<void> _pickAndSendImages() async {
+    final List<XFile> picked = await _picker.pickMultiImage(imageQuality: 80);
+    if (picked.isEmpty) return;
     setState(() => _uploadingImage = true);
     try {
-      final bytes = await picked.readAsBytes();
-      final ext = picked.name.contains('.') ? picked.name.split('.').last : 'jpg';
-      final path = '$_currentUserId/${DateTime.now().millisecondsSinceEpoch}.$ext';
-      await supabase.storage.from('chat_images').uploadBinary(path, bytes, fileOptions: const FileOptions(upsert: false));
-      final publicUrl = supabase.storage.from('chat_images').getPublicUrl(path);
-      await supabase.from('messages').insert({'sender_id': _currentUserId, 'receiver_id': widget.receiverId, 'image_url': publicUrl});
+      final List<String> urls = [];
+      for (final file in picked) {
+        final bytes = await file.readAsBytes();
+        final ext = file.name.contains('.') ? file.name.split('.').last : 'jpg';
+        final path = '$_currentUserId/${DateTime.now().millisecondsSinceEpoch}_${urls.length}.$ext';
+        await supabase.storage.from('chat_images').uploadBinary(path, bytes, fileOptions: const FileOptions(upsert: false));
+        urls.add(supabase.storage.from('chat_images').getPublicUrl(path));
+      }
+      await supabase.from('messages').insert({
+        'sender_id': _currentUserId,
+        'receiver_id': widget.receiverId,
+        'image_urls': urls,
+      });
     } catch (e) {
       debugPrint('IMAGE UPLOAD ERROR: $e');
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Failed to send image. Check your connection and try again.')));
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Failed to send images. Check your connection and try again.')),
+        );
       }
     } finally {
       if (mounted) setState(() => _uploadingImage = false);
@@ -178,10 +204,52 @@ class _ChatScreenState extends State<ChatScreen> {
         await supabase.from('messages').delete().eq('id', messageId);
       } catch (e) {
         if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Failed to delete message. Check your connection.')));
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Failed to delete message. Check your connection.')),
+          );
         }
       }
     }
+  }
+
+  void _showMessageOptions(Map<String, dynamic> msg, bool isMe, String? content) {
+    showModalBottomSheet(
+      context: context,
+      builder: (context) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: const Icon(Icons.reply),
+              title: const Text('Reply'),
+              onTap: () {
+                Navigator.pop(context);
+                setState(() => _replyingTo = msg);
+              },
+            ),
+            if (content != null && content.isNotEmpty)
+              ListTile(
+                leading: const Icon(Icons.copy_outlined),
+                title: const Text('Copy text'),
+                onTap: () {
+                  Navigator.pop(context);
+                  Clipboard.setData(ClipboardData(text: content));
+                  ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Copied')));
+                },
+              ),
+            if (isMe)
+              ListTile(
+                leading: const Icon(Icons.delete_outline, color: Colors.red),
+                title: const Text('Delete', style: TextStyle(color: Colors.red)),
+                onTap: () {
+                  Navigator.pop(context);
+                  _confirmDelete(msg['id']);
+                },
+              ),
+          ],
+        ),
+      ),
+    );
   }
 
   void _openFullImage(String url) {
@@ -195,6 +263,97 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
+  void _openImageGallery(List<String> urls, int initialIndex) {
+    showDialog(
+      context: context,
+      builder: (context) => Dialog(
+        backgroundColor: Colors.black,
+        insetPadding: const EdgeInsets.all(12),
+        child: SizedBox(
+          height: 500,
+          child: PageView.builder(
+            controller: PageController(initialPage: initialIndex),
+            itemCount: urls.length,
+            itemBuilder: (context, i) => InteractiveViewer(child: Image.network(urls[i], fit: BoxFit.contain)),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildImageGrid(List<String> urls) {
+    if (urls.length == 1) {
+      return GestureDetector(
+        onTap: () => _openImageGallery(urls, 0),
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(12),
+          child: AspectRatio(aspectRatio: 4 / 3, child: Image.network(urls[0], fit: BoxFit.cover)),
+        ),
+      );
+    }
+
+    if (urls.length == 2) {
+      return ClipRRect(
+        borderRadius: BorderRadius.circular(12),
+        child: SizedBox(
+          height: 140,
+          child: Row(
+            children: [
+              Expanded(child: GestureDetector(onTap: () => _openImageGallery(urls, 0), child: Image.network(urls[0], fit: BoxFit.cover, height: double.infinity))),
+              const SizedBox(width: 2),
+              Expanded(child: GestureDetector(onTap: () => _openImageGallery(urls, 1), child: Image.network(urls[1], fit: BoxFit.cover, height: double.infinity))),
+            ],
+          ),
+        ),
+      );
+    }
+
+    final belowCount = (urls.length - 1) > 3 ? 3 : (urls.length - 1);
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(12),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          GestureDetector(
+            onTap: () => _openImageGallery(urls, 0),
+            child: AspectRatio(aspectRatio: 16 / 9, child: Image.network(urls[0], fit: BoxFit.cover)),
+          ),
+          const SizedBox(height: 2),
+          SizedBox(
+            height: 80,
+            child: Row(
+              children: List.generate(belowCount, (i) {
+                final urlIndex = i + 1;
+                final isLastOverlay = i == 2 && urls.length > 4;
+                return Expanded(
+                  child: Padding(
+                    padding: EdgeInsets.only(left: i == 0 ? 0 : 2),
+                    child: GestureDetector(
+                      onTap: () => _openImageGallery(urls, urlIndex),
+                      child: Stack(
+                        fit: StackFit.expand,
+                        children: [
+                          Image.network(urls[urlIndex], fit: BoxFit.cover),
+                          if (isLastOverlay)
+                            Container(
+                              color: Colors.black54,
+                              child: Center(
+                                child: Text('+${urls.length - 4}', style: const TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold)),
+                              ),
+                            ),
+                        ],
+                      ),
+                    ),
+                  ),
+                );
+              }),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   String _formatDateDivider(DateTime date) {
     final now = DateTime.now();
     final today = DateTime(now.year, now.month, now.day);
@@ -202,6 +361,17 @@ class _ChatScreenState extends State<ChatScreen> {
     if (messageDate == today) return 'Today';
     if (messageDate == today.subtract(const Duration(days: 1))) return 'Yesterday';
     return DateFormat('MMMM d, yyyy').format(date);
+  }
+
+  String _formatLastSeen(String? lastSeenIso) {
+    if (lastSeenIso == null) return '';
+    final dt = DateTime.parse(lastSeenIso).toLocal();
+    final diff = DateTime.now().difference(dt);
+    if (diff.inMinutes < 1) return 'Last seen just now';
+    if (diff.inMinutes < 60) return 'Last seen ${diff.inMinutes}m ago';
+    if (diff.inHours < 24) return 'Last seen ${diff.inHours}h ago';
+    if (diff.inDays < 7) return 'Last seen ${diff.inDays}d ago';
+    return 'Last seen ${DateFormat('MMM d').format(dt)}';
   }
 
   Map<String, dynamic>? _findMessageById(List<Map<String, dynamic>> messages, String? id) {
@@ -226,13 +396,37 @@ class _ChatScreenState extends State<ChatScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Text(widget.receiverUsername),
-            if (_otherUserTyping) const Text('typing...', style: TextStyle(fontSize: 12, fontStyle: FontStyle.italic)),
-          ],
+        title: GestureDetector(
+          onTap: () {
+            Navigator.push(
+              context,
+              MaterialPageRoute(builder: (_) => ContactInfoScreen(userId: widget.receiverId, username: widget.receiverUsername)),
+            );
+          },
+          child: StreamBuilder<Map<String, dynamic>?>(
+            stream: _receiverStatusStream,
+            builder: (context, snapshot) {
+              final data = snapshot.data;
+              final isOnline = data?['online'] == true;
+              String statusText;
+              if (_otherUserTyping) {
+                statusText = 'typing...';
+              } else if (isOnline) {
+                statusText = 'Online';
+              } else {
+                statusText = _formatLastSeen(data?['last_seen'] as String?);
+              }
+              return Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(widget.receiverUsername),
+                  if (statusText.isNotEmpty)
+                    Text(statusText, style: TextStyle(fontSize: 12, fontStyle: _otherUserTyping ? FontStyle.italic : FontStyle.normal)),
+                ],
+              );
+            },
+          ),
         ),
         actions: [
           PopupMenuButton<String>(
@@ -242,7 +436,10 @@ class _ChatScreenState extends State<ChatScreen> {
             itemBuilder: (context) => [
               PopupMenuItem(
                 value: 'block',
-                child: ListTile(leading: Icon(_isBlockedByMe ? Icons.person_add_outlined : Icons.block), title: Text(_isBlockedByMe ? 'Unblock user' : 'Block user')),
+                child: ListTile(
+                  leading: Icon(_isBlockedByMe ? Icons.person_add_outlined : Icons.block),
+                  title: Text(_isBlockedByMe ? 'Unblock user' : 'Block user'),
+                ),
               ),
             ],
           ),
@@ -267,7 +464,9 @@ class _ChatScreenState extends State<ChatScreen> {
               stream: _messagesStream,
               builder: (context, snapshot) {
                 if (snapshot.hasError) {
-                  return const Center(child: Padding(padding: EdgeInsets.all(24), child: Text('Couldn\'t load messages. Check your connection.', textAlign: TextAlign.center)));
+                  return const Center(
+                    child: Padding(padding: EdgeInsets.all(24), child: Text('Couldn\'t load messages. Check your connection.', textAlign: TextAlign.center)),
+                  );
                 }
                 if (!snapshot.hasData) {
                   return const Center(child: CircularProgressIndicator());
@@ -292,10 +491,13 @@ class _ChatScreenState extends State<ChatScreen> {
                     final msg = messages[index];
                     final isMe = msg['sender_id'] == _currentUserId;
                     final isRead = msg['is_read'] == true;
+                    final isDelivered = msg['delivered_at'] != null;
                     final time = DateTime.parse(msg['created_at']).toLocal();
                     final imageUrl = msg['image_url'] as String?;
+                    final imageUrls = (msg['image_urls'] as List?)?.cast<String>();
                     final content = msg['content'] as String?;
                     final quoted = _findMessageById(messages, msg['reply_to_id'] as String?);
+                    final hasImages = (imageUrls != null && imageUrls.isNotEmpty) || imageUrl != null;
 
                     final showDateDivider = index == 0 ||
                         DateTime.parse(messages[index - 1]['created_at']).toLocal().day != time.day ||
@@ -320,25 +522,18 @@ class _ChatScreenState extends State<ChatScreen> {
                           alignment: isMe ? Alignment.centerRight : Alignment.centerLeft,
                           child: Dismissible(
                             key: ValueKey('dismiss_${msg['id']}'),
-                            direction: isMe ? DismissDirection.endToStart : DismissDirection.startToEnd,
+                            direction: DismissDirection.horizontal,
                             confirmDismiss: (direction) async {
-                              if (isMe) {
-                                _confirmDelete(msg['id']);
-                              } else {
-                                setState(() => _replyingTo = msg);
-                              }
+                              setState(() => _replyingTo = msg);
                               return false;
                             },
-                            background: Container(
-                              alignment: isMe ? Alignment.centerRight : Alignment.centerLeft,
-                              padding: const EdgeInsets.symmetric(horizontal: 20),
-                              child: Icon(isMe ? Icons.delete_outline : Icons.reply, color: Colors.black45),
-                            ),
+                            background: Container(alignment: Alignment.centerLeft, padding: const EdgeInsets.symmetric(horizontal: 20), child: const Icon(Icons.reply, color: Colors.black45)),
+                            secondaryBackground: Container(alignment: Alignment.centerRight, padding: const EdgeInsets.symmetric(horizontal: 20), child: const Icon(Icons.reply, color: Colors.black45)),
                             child: GestureDetector(
-                              onLongPress: isMe ? () => _confirmDelete(msg['id']) : null,
+                              onLongPress: () => _showMessageOptions(msg, isMe, content),
                               child: Container(
                                 margin: const EdgeInsets.symmetric(vertical: 4),
-                                padding: imageUrl != null ? const EdgeInsets.all(4) : const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                                padding: hasImages ? const EdgeInsets.all(4) : const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
                                 constraints: BoxConstraints(maxWidth: MediaQuery.of(context).size.width * 0.7),
                                 decoration: BoxDecoration(
                                   color: isMe ? const Color(0xFFC9E4B0) : const Color(0xFFE0D4F0),
@@ -364,7 +559,9 @@ class _ChatScreenState extends State<ChatScreen> {
                                           style: const TextStyle(fontSize: 12, color: Colors.black54),
                                         ),
                                       ),
-                                    if (imageUrl != null)
+                                    if (imageUrls != null && imageUrls.isNotEmpty)
+                                      _buildImageGrid(imageUrls)
+                                    else if (imageUrl != null)
                                       GestureDetector(
                                         onTap: () => _openFullImage(imageUrl),
                                         child: ClipRRect(
@@ -382,18 +579,18 @@ class _ChatScreenState extends State<ChatScreen> {
                                       ),
                                     if (content != null && content.isNotEmpty)
                                       Padding(
-                                        padding: imageUrl != null ? const EdgeInsets.only(top: 6, left: 6, right: 6) : EdgeInsets.zero,
+                                        padding: hasImages ? const EdgeInsets.only(top: 6, left: 6, right: 6) : EdgeInsets.zero,
                                         child: Text(content, style: const TextStyle(color: Colors.black87)),
                                       ),
                                     Padding(
-                                      padding: imageUrl != null ? const EdgeInsets.only(top: 4, left: 6, right: 6, bottom: 2) : const EdgeInsets.only(top: 4),
+                                      padding: hasImages ? const EdgeInsets.only(top: 4, left: 6, right: 6, bottom: 2) : const EdgeInsets.only(top: 4),
                                       child: Row(
                                         mainAxisSize: MainAxisSize.min,
                                         children: [
                                           Text(DateFormat('h:mm a').format(time), style: const TextStyle(fontSize: 10, color: Colors.black54)),
                                           if (isMe) ...[
                                             const SizedBox(width: 4),
-                                            Icon(isRead ? Icons.done_all : Icons.done, size: 14, color: isRead ? Colors.blue : Colors.black45),
+                                            Icon((isRead || isDelivered) ? Icons.done_all : Icons.done, size: 14, color: isRead ? Colors.blue : Colors.black45),
                                           ],
                                         ],
                                       ),
@@ -425,10 +622,7 @@ class _ChatScreenState extends State<ChatScreen> {
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          Text(
-                            _replyingTo!['sender_id'] == _currentUserId ? 'Replying to yourself' : 'Replying to ${widget.receiverUsername}',
-                            style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12),
-                          ),
+                          Text(_replyingTo!['sender_id'] == _currentUserId ? 'Replying to yourself' : 'Replying to ${widget.receiverUsername}', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12)),
                           Text(
                             (_replyingTo!['content'] as String?)?.isNotEmpty == true ? _replyingTo!['content'] : '📷 Photo',
                             maxLines: 1,
@@ -449,7 +643,7 @@ class _ChatScreenState extends State<ChatScreen> {
                   children: [
                     IconButton(
                       icon: _uploadingImage ? const SizedBox(height: 20, width: 20, child: CircularProgressIndicator(strokeWidth: 2)) : const Icon(Icons.image_outlined),
-                      onPressed: _uploadingImage ? null : _pickAndSendImage,
+                      onPressed: _uploadingImage ? null : _pickAndSendImages,
                     ),
                     Expanded(
                       child: TextField(

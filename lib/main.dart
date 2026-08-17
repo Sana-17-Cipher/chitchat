@@ -5,7 +5,6 @@ import 'screens/home_screen.dart';
 import 'config.dart';
 
 final navigatorKey = GlobalKey<NavigatorState>();
-final scaffoldMessengerKey = GlobalKey<ScaffoldMessengerState>();
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -27,14 +26,45 @@ Future<void> main() async {
 
 final supabase = Supabase.instance.client;
 
-class ChitChatApp extends StatelessWidget {
+class ChitChatApp extends StatefulWidget {
   const ChitChatApp({super.key});
+
+  @override
+  State<ChitChatApp> createState() => _ChitChatAppState();
+}
+
+class _ChitChatAppState extends State<ChitChatApp> with WidgetsBindingObserver {
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    final userId = supabase.auth.currentUser?.id;
+    if (userId == null) return;
+
+    if (state == AppLifecycleState.resumed) {
+      supabase.from('profiles').update({'online': true}).eq('id', userId);
+    } else if (state == AppLifecycleState.paused || state == AppLifecycleState.detached) {
+      supabase.from('profiles').update({
+        'online': false,
+        'last_seen': DateTime.now().toIso8601String(),
+      }).eq('id', userId);
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
       navigatorKey: navigatorKey,
-      scaffoldMessengerKey: scaffoldMessengerKey,
       title: 'ChitChat',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
