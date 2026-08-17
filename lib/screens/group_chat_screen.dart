@@ -96,6 +96,14 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
     }
   }
 
+  Future<void> _markGroupAsRead() async {
+    try {
+      await supabase.from('group_members').update({'last_read_at': DateTime.now().toIso8601String()}).eq('group_id', widget.groupId).eq('user_id', _currentUserId);
+    } catch (e) {
+      debugPrint('Failed to mark group as read: $e');
+    }
+  }
+
   Future<void> _sendMessage() async {
     final text = _messageController.text.trim();
     if (text.isEmpty) return;
@@ -399,6 +407,7 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
                 }
 
                 WidgetsBinding.instance.addPostFrameCallback((_) {
+                  _markGroupAsRead();
                   if (_scrollController.hasClients) {
                     _scrollController.animateTo(_scrollController.position.maxScrollExtent, duration: const Duration(milliseconds: 200), curve: Curves.easeOut);
                   }

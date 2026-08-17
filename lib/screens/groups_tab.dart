@@ -12,7 +12,9 @@ class GroupsTab extends StatefulWidget {
 class _GroupsTabState extends State<GroupsTab> {
   final supabase = Supabase.instance.client;
   late final Stream<List<Map<String, dynamic>>> _groupMembershipStream;
+  late final Stream<List<Map<String, dynamic>>> _groupMessagesWatchStream;
   List<Map<String, dynamic>> _groups = [];
+  Map<String, int> _unreadCounts = {};
   bool _loading = true;
 
   @override
@@ -21,6 +23,10 @@ class _GroupsTabState extends State<GroupsTab> {
     final currentUserId = supabase.auth.currentUser!.id;
     _groupMembershipStream = supabase.from('group_members').stream(primaryKey: ['group_id', 'user_id']).eq('user_id', currentUserId);
     _groupMembershipStream.listen((_) => _fetchGroups());
+
+    _groupMessagesWatchStream = supabase.from('group_messages').stream(primaryKey: ['id']);
+    _groupMessagesWatchStream.listen((_) => _fetchGroups());
+
     _fetchGroups();
   }
 
@@ -29,9 +35,17 @@ class _GroupsTabState extends State<GroupsTab> {
     try {
       final response = await supabase.from('group_members').select('groups(id, name, created_by, avatar_url)').eq('user_id', currentUserId);
       final groups = (response as List).map((row) => row['groups'] as Map<String, dynamic>).toList();
+
+      final unreadResponse = await supabase.rpc('get_my_group_unread_counts');
+      final unreadMap = <String, int>{};
+      for (final row in unreadResponse as List) {
+        unreadMap[row['group_id']] = (row['unread_count'] as num).toInt();
+      }
+
       if (mounted) {
         setState(() {
           _groups = groups;
+          _unreadCounts = unreadMap;
           _loading = false;
         });
       }
@@ -67,14 +81,20 @@ class _GroupsTabState extends State<GroupsTab> {
         itemCount: _groups.length,
         itemBuilder: (context, index) {
           final group = _groups[index];
+          final groupId = group['id'] as String;
+          final unread = _unreadCounts[groupId] ?? 0;
           return ListTile(
             leading: CircleAvatar(
               backgroundImage: group['avatar_url'] != null ? NetworkImage(group['avatar_url']) : null,
               child: group['avatar_url'] == null ? const Icon(Icons.group) : null,
             ),
-            title: Text(group['name'] ?? 'Unnamed group'),
+            title: Text(group['name'] ?? 'Unnamed group', style: unread > 0 ? const TextStyle(fontWeight: FontWeight.bold) : null),
+            trailing: unread > 0
+                ? CircleAvatar(radius: 11, backgroundColor: Colors.red, child: Text('$unread', style: const TextStyle(color: Colors.white, fontSize: 11)))
+                : null,
             onTap: () {
-              Navigator.push(context, MaterialPageRoute(builder: (_) => GroupChatScreen(groupId: group['id'], groupName: group['name'])));
+              Navigator.push(context, MaterialPageRoute(builder: (_) => GroupChatScreen(groupId: groupId, groupName: group['name'])))
+                  .then((_) => _fetchGroups());
             },
           );
         },
