@@ -35,23 +35,28 @@ class _GroupsTabState extends State<GroupsTab> {
     try {
       final response = await supabase.from('group_members').select('groups(id, name, created_by, avatar_url)').eq('user_id', currentUserId);
       final groups = (response as List).map((row) => row['groups'] as Map<String, dynamic>).toList();
-
-      final unreadResponse = await supabase.rpc('get_my_group_unread_counts');
-      final unreadMap = <String, int>{};
-      for (final row in unreadResponse as List) {
-        unreadMap[row['group_id']] = (row['unread_count'] as num).toInt();
-      }
-
       if (mounted) {
         setState(() {
           _groups = groups;
-          _unreadCounts = unreadMap;
           _loading = false;
         });
       }
     } catch (e) {
-      debugPrint('Failed to fetch groups: $e');
+      debugPrint('FETCH GROUPS ERROR: $e');
       if (mounted) setState(() => _loading = false);
+    }
+
+    try {
+      final unreadResponse = await supabase.rpc('get_my_group_unread_counts');
+      debugPrint('GROUP UNREAD RAW RESPONSE: $unreadResponse');
+      final unreadMap = <String, int>{};
+      for (final row in unreadResponse as List) {
+        unreadMap[row['group_id']] = (row['unread_count'] as num).toInt();
+      }
+      debugPrint('GROUP UNREAD MAP: $unreadMap');
+      if (mounted) setState(() => _unreadCounts = unreadMap);
+    } catch (e) {
+      debugPrint('GROUP UNREAD COUNT ERROR: $e');
     }
   }
 

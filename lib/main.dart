@@ -3,11 +3,13 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import 'screens/auth_screen.dart';
 import 'screens/home_screen.dart';
 import 'config.dart';
-
+import 'package:firebase_core/firebase_core.dart';
+import 'notification_service.dart';
 final navigatorKey = GlobalKey<NavigatorState>();
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  await Firebase.initializeApp();
   await Supabase.initialize(
     url: supabaseUrl,
     publishableKey: supabaseAnonKey,
@@ -18,6 +20,7 @@ Future<void> main() async {
     final session = data.session;
     if ((event == AuthChangeEvent.signedIn || event == AuthChangeEvent.initialSession) && session != null) {
       await Supabase.instance.client.from('profiles').update({'online': true}).eq('id', session.user.id);
+      await NotificationService.initialize();
     }
   });
 
