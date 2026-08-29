@@ -95,7 +95,6 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
       debugPrint('Failed to load group members: $e');
     }
   }
-
   Future<void> _markGroupAsRead() async {
     try {
       await supabase.from('group_members').update({'last_read_at': DateTime.now().toIso8601String()}).eq('group_id', widget.groupId).eq('user_id', _currentUserId);
@@ -103,6 +102,8 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
       debugPrint('Failed to mark group as read: $e');
     }
   }
+
+
 
   Future<void> _sendMessage() async {
     final text = _messageController.text.trim();
@@ -405,6 +406,12 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
                 if (messages.isEmpty) {
                   return const Center(child: Text('No messages yet — say hi 👋'));
                 }
+                WidgetsBinding.instance.addPostFrameCallback((_) {
+                  _markGroupAsRead();
+                  if (_scrollController.hasClients) {
+                    _scrollController.animateTo(_scrollController.position.maxScrollExtent, duration: const Duration(milliseconds: 200), curve: Curves.easeOut);
+                  }
+                });
 
                 WidgetsBinding.instance.addPostFrameCallback((_) {
                   _markGroupAsRead();

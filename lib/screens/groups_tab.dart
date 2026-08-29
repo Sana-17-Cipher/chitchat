@@ -48,12 +48,10 @@ class _GroupsTabState extends State<GroupsTab> {
 
     try {
       final unreadResponse = await supabase.rpc('get_my_group_unread_counts');
-      debugPrint('GROUP UNREAD RAW RESPONSE: $unreadResponse');
       final unreadMap = <String, int>{};
       for (final row in unreadResponse as List) {
         unreadMap[row['group_id']] = (row['unread_count'] as num).toInt();
       }
-      debugPrint('GROUP UNREAD MAP: $unreadMap');
       if (mounted) setState(() => _unreadCounts = unreadMap);
     } catch (e) {
       debugPrint('GROUP UNREAD COUNT ERROR: $e');
