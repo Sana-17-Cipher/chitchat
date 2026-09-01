@@ -4,6 +4,8 @@ import 'package:flutter/services.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:intl/intl.dart';
 import 'package:image_picker/image_picker.dart';
+import 'package:file_picker/file_picker.dart';
+import 'package:url_launcher/url_launcher.dart';
 import 'contact_info_screen.dart';
 
 class ChatScreen extends StatefulWidget {
@@ -28,9 +30,14 @@ class _ChatScreenState extends State<ChatScreen> {
 
   bool _otherUserTyping = false;
   bool _uploadingImage = false;
+  bool _uploadingFile = false;
   bool _isBlockedByMe = false;
+  bool _isBlockedByThem = false;
   Map<String, dynamic>? _replyingTo;
   Timer? _typingTimer;
+
+  bool get _isBlocked => _isBlockedByMe || _isBlockedByThem;
+  bool get _isUploading => _uploadingImage || _uploadingFile;
 
   @override
   void initState() {
@@ -74,13 +81,24 @@ class _ChatScreenState extends State<ChatScreen> {
 
   Future<void> _checkBlockStatus() async {
     try {
-      final data = await supabase
+      final myBlock = await supabase
           .from('blocked_users')
           .select()
           .eq('blocker_id', _currentUserId)
           .eq('blocked_id', widget.receiverId)
           .maybeSingle();
-      if (mounted) setState(() => _isBlockedByMe = data != null);
+      final theirBlock = await supabase
+          .from('blocked_users')
+          .select()
+          .eq('blocker_id', widget.receiverId)
+          .eq('blocked_id', _currentUserId)
+          .maybeSingle();
+      if (mounted) {
+        setState(() {
+          _isBlockedByMe = myBlock != null;
+          _isBlockedByThem = theirBlock != null;
+        });
+      }
     } catch (e) {
       debugPrint('Failed to check block status: $e');
     }
@@ -95,7 +113,7 @@ class _ChatScreenState extends State<ChatScreen> {
         context: context,
         builder: (context) => AlertDialog(
           title: Text('Block ${widget.receiverUsername}?'),
-          content: const Text('They won\'t be able to send you messages anymore.'),
+          content: const Text('They won\'t be able to send you messages or see your online status anymore.'),
           actions: [
             TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
             TextButton(onPressed: () => Navigator.pop(context, true), child: const Text('Block')),
@@ -184,6 +202,98 @@ class _ChatScreenState extends State<ChatScreen> {
       }
     } finally {
       if (mounted) setState(() => _uploadingImage = false);
+    }
+  }
+
+  Future<void> _pickAndSendFile() async {
+    final result = await FilePicker.platform.pickFiles(withData: true);
+    if (result == null || result.files.isEmpty) return;
+    final picked = result.files.first;
+    if (picked.bytes == null) return;
+
+    setState(() => _uploadingFile = true);
+    try {
+      final path = 'files/$_currentUserId/${DateTime.now().millisecondsSinceEpoch}_${picked.name}';
+      await supabase.storage.from('chat_images').uploadBinary(path, picked.bytes!, fileOptions: const FileOptions(upsert: false));
+      final publicUrl = supabase.storage.from('chat_images').getPublicUrl(path);
+
+      await supabase.from('messages').insert({
+        'sender_id': _currentUserId,
+        'receiver_id': widget.receiverId,
+        'file_url': publicUrl,
+        'file_name': picked.name,
+      });
+    } catch (e) {
+      debugPrint('FILE UPLOAD ERROR: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Failed to send file. Check your connection and try again.')),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _uploadingFile = false);
+    }
+  }
+
+  Future<void> _openFile(String url) async {
+    final uri = Uri.parse(url);
+    try {
+      await launchUrl(uri, mode: LaunchMode.externalApplication);
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Could not open file')));
+      }
+    }
+  }
+
+  void _showAttachOptions() {
+    showModalBottomSheet(
+      context: context,
+      builder: (context) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: const Icon(Icons.photo_outlined),
+              title: const Text('Photo'),
+              onTap: () {
+                Navigator.pop(context);
+                _pickAndSendImages();
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.insert_drive_file_outlined),
+              title: const Text('Document'),
+              onTap: () {
+                Navigator.pop(context);
+                _pickAndSendFile();
+              },
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  IconData _fileIconFor(String? fileName) {
+    final ext = (fileName ?? '').split('.').last.toLowerCase();
+    switch (ext) {
+      case 'pdf':
+        return Icons.picture_as_pdf;
+      case 'doc':
+      case 'docx':
+        return Icons.description;
+      case 'xls':
+      case 'xlsx':
+        return Icons.table_chart;
+      case 'ppt':
+      case 'pptx':
+        return Icons.slideshow;
+      case 'zip':
+      case 'rar':
+        return Icons.folder_zip;
+      default:
+        return Icons.insert_drive_file;
     }
   }
 
@@ -285,13 +395,9 @@ class _ChatScreenState extends State<ChatScreen> {
     if (urls.length == 1) {
       return GestureDetector(
         onTap: () => _openImageGallery(urls, 0),
-        child: ClipRRect(
-          borderRadius: BorderRadius.circular(12),
-          child: AspectRatio(aspectRatio: 4 / 3, child: Image.network(urls[0], fit: BoxFit.cover)),
-        ),
+        child: ClipRRect(borderRadius: BorderRadius.circular(12), child: AspectRatio(aspectRatio: 4 / 3, child: Image.network(urls[0], fit: BoxFit.cover))),
       );
     }
-
     if (urls.length == 2) {
       return ClipRRect(
         borderRadius: BorderRadius.circular(12),
@@ -307,17 +413,13 @@ class _ChatScreenState extends State<ChatScreen> {
         ),
       );
     }
-
     final belowCount = (urls.length - 1) > 3 ? 3 : (urls.length - 1);
     return ClipRRect(
       borderRadius: BorderRadius.circular(12),
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          GestureDetector(
-            onTap: () => _openImageGallery(urls, 0),
-            child: AspectRatio(aspectRatio: 16 / 9, child: Image.network(urls[0], fit: BoxFit.cover)),
-          ),
+          GestureDetector(onTap: () => _openImageGallery(urls, 0), child: AspectRatio(aspectRatio: 16 / 9, child: Image.network(urls[0], fit: BoxFit.cover))),
           const SizedBox(height: 2),
           SizedBox(
             height: 80,
@@ -335,12 +437,7 @@ class _ChatScreenState extends State<ChatScreen> {
                         children: [
                           Image.network(urls[urlIndex], fit: BoxFit.cover),
                           if (isLastOverlay)
-                            Container(
-                              color: Colors.black54,
-                              child: Center(
-                                child: Text('+${urls.length - 4}', style: const TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold)),
-                              ),
-                            ),
+                            Container(color: Colors.black54, child: Center(child: Text('+${urls.length - 4}', style: const TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold)))),
                         ],
                       ),
                     ),
@@ -409,7 +506,9 @@ class _ChatScreenState extends State<ChatScreen> {
               final data = snapshot.data;
               final isOnline = data?['online'] == true;
               String statusText;
-              if (_otherUserTyping) {
+              if (_isBlocked) {
+                statusText = '';
+              } else if (_otherUserTyping) {
                 statusText = 'typing...';
               } else if (isOnline) {
                 statusText = 'Online';
@@ -447,15 +546,18 @@ class _ChatScreenState extends State<ChatScreen> {
       ),
       body: Column(
         children: [
-          if (_isBlockedByMe)
+          if (_isBlocked)
             Container(
               width: double.infinity,
               color: Colors.red.shade50,
               padding: const EdgeInsets.all(12),
               child: Column(
                 children: [
-                  Text('You blocked ${widget.receiverUsername}', textAlign: TextAlign.center),
-                  TextButton(onPressed: _toggleBlock, child: const Text('Unblock')),
+                  Text(
+                    _isBlockedByMe ? 'You blocked ${widget.receiverUsername}' : 'You can\'t message this user',
+                    textAlign: TextAlign.center,
+                  ),
+                  if (_isBlockedByMe) TextButton(onPressed: _toggleBlock, child: const Text('Unblock')),
                 ],
               ),
             ),
@@ -495,9 +597,12 @@ class _ChatScreenState extends State<ChatScreen> {
                     final time = DateTime.parse(msg['created_at']).toLocal();
                     final imageUrl = msg['image_url'] as String?;
                     final imageUrls = (msg['image_urls'] as List?)?.cast<String>();
+                    final fileUrl = msg['file_url'] as String?;
+                    final fileName = msg['file_name'] as String?;
                     final content = msg['content'] as String?;
                     final quoted = _findMessageById(messages, msg['reply_to_id'] as String?);
                     final hasImages = (imageUrls != null && imageUrls.isNotEmpty) || imageUrl != null;
+                    final hasAttachment = hasImages || fileUrl != null;
 
                     final showDateDivider = index == 0 ||
                         DateTime.parse(messages[index - 1]['created_at']).toLocal().day != time.day ||
@@ -577,13 +682,39 @@ class _ChatScreenState extends State<ChatScreen> {
                                           ),
                                         ),
                                       ),
+                                    if (fileUrl != null)
+                                      InkWell(
+                                        onTap: () => _openFile(fileUrl),
+                                        child: Container(
+                                          padding: const EdgeInsets.all(8),
+                                          margin: hasImages ? const EdgeInsets.only(top: 6) : EdgeInsets.zero,
+                                          decoration: BoxDecoration(color: Colors.white.withOpacity(0.5), borderRadius: BorderRadius.circular(8)),
+                                          child: Row(
+                                            mainAxisSize: MainAxisSize.min,
+                                            children: [
+                                              Icon(_fileIconFor(fileName), size: 28, color: Colors.black87),
+                                              const SizedBox(width: 8),
+                                              Flexible(
+                                                child: Text(
+                                                  fileName ?? 'File',
+                                                  overflow: TextOverflow.ellipsis,
+                                                  maxLines: 1,
+                                                  style: const TextStyle(color: Colors.black87),
+                                                ),
+                                              ),
+                                              const SizedBox(width: 4),
+                                              const Icon(Icons.download_outlined, size: 18, color: Colors.black54),
+                                            ],
+                                          ),
+                                        ),
+                                      ),
                                     if (content != null && content.isNotEmpty)
                                       Padding(
-                                        padding: hasImages ? const EdgeInsets.only(top: 6, left: 6, right: 6) : EdgeInsets.zero,
+                                        padding: hasAttachment ? const EdgeInsets.only(top: 6, left: 6, right: 6) : EdgeInsets.zero,
                                         child: Text(content, style: const TextStyle(color: Colors.black87)),
                                       ),
                                     Padding(
-                                      padding: hasImages ? const EdgeInsets.only(top: 4, left: 6, right: 6, bottom: 2) : const EdgeInsets.only(top: 4),
+                                      padding: hasAttachment ? const EdgeInsets.only(top: 4, left: 6, right: 6, bottom: 2) : const EdgeInsets.only(top: 4),
                                       child: Row(
                                         mainAxisSize: MainAxisSize.min,
                                         children: [
@@ -608,7 +739,7 @@ class _ChatScreenState extends State<ChatScreen> {
               },
             ),
           ),
-          if (!_isBlockedByMe) ...[
+          if (!_isBlocked) ...[
             if (_replyingTo != null)
               Container(
                 width: double.infinity,
@@ -642,8 +773,10 @@ class _ChatScreenState extends State<ChatScreen> {
                 child: Row(
                   children: [
                     IconButton(
-                      icon: _uploadingImage ? const SizedBox(height: 20, width: 20, child: CircularProgressIndicator(strokeWidth: 2)) : const Icon(Icons.image_outlined),
-                      onPressed: _uploadingImage ? null : _pickAndSendImages,
+                      icon: _isUploading
+                          ? const SizedBox(height: 20, width: 20, child: CircularProgressIndicator(strokeWidth: 2))
+                          : const Icon(Icons.attach_file),
+                      onPressed: _isUploading ? null : _showAttachOptions,
                     ),
                     Expanded(
                       child: TextField(
